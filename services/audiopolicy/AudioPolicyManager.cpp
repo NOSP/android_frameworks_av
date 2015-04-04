@@ -60,6 +60,8 @@
 #define ALOGVV(a...) do { } while(0)
 #endif
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 // A device mask for all audio input devices that are considered "virtual" when evaluating
 // active inputs in getActiveInput()
 //FIXME::  Audio team
@@ -76,6 +78,10 @@
 // type alone is not enough: the address must match too
 #define APM_AUDIO_DEVICE_MATCH_ADDRESS_ALL (AUDIO_DEVICE_IN_REMOTE_SUBMIX | \
                                             AUDIO_DEVICE_OUT_REMOTE_SUBMIX)
+
+// Following delay should be used if the calculated routing delay from all active
+// input streams is higher than this value
+#define MAX_VOICE_CALL_START_DELAY_MS 100
 
 #include <inttypes.h>
 #include <math.h>
@@ -269,6 +275,11 @@ const StringToEnum sInChannelsNameToEnumTable[] = {
     STRING_TO_ENUM(AUDIO_CHANNEL_IN_FRONT_BACK),
 #ifdef AUDIO_EXTN_SSR_ENABLED
     STRING_TO_ENUM(AUDIO_CHANNEL_IN_5POINT1),
+#endif
+#ifdef QCOM_DIRECTTRACK
+    STRING_TO_ENUM(AUDIO_CHANNEL_IN_VOICE_CALL_MONO),
+    STRING_TO_ENUM(AUDIO_CHANNEL_IN_VOICE_DNLINK_MONO),
+    STRING_TO_ENUM(AUDIO_CHANNEL_IN_VOICE_UPLINK_MONO),
 #endif
 };
 
@@ -1077,6 +1088,9 @@ void AudioPolicyManager::setPhoneState(audio_mode_t state)
             setStrategyMute(STRATEGY_SONIFICATION, false, mOutputs.keyAt(i), MUTE_TIME_MS,
                 getDeviceForStrategy(STRATEGY_SONIFICATION, true /*fromCache*/));
         }
+         ALOGV("Setting the delay from %dms to %dms", delayMs,
+               MIN(delayMs, MAX_VOICE_CALL_START_DELAY_MS));
+         delayMs = MIN(delayMs, MAX_VOICE_CALL_START_DELAY_MS);
     }
 
     // Note that despite the fact that getNewOutputDevice() is called on the primary output,
@@ -2265,27 +2279,22 @@ status_t AudioPolicyManager::getInputForAttr(const audio_attributes_t *attr,
         } else {
             *inputType = API_INPUT_LEGACY;
         }
-        /*The below code is intentionally not ported.
-        It's not needed to update the channel mask based on source because
-        the source is sent to audio HAL through set_parameters().
-        for example, if source = VOICE_CALL, does not mean we need to capture two channels.
-        If the sound recorder app selects AMR as encoding format but source as RX+TX,
-        we need both in ONE channel. So we use the channels set by the app and use source
-        to tell the driver what needs to captured (RX only, TX only, or RX+TX ).*/
+#ifdef QCOM_DIRECTTRACK
         // adapt channel selection to input source
-        /*switch (inputSource) {
+        switch (inputSource) {
         case AUDIO_SOURCE_VOICE_UPLINK:
-            channelMask = AUDIO_CHANNEL_IN_VOICE_UPLINK;
+            channelMask |= AUDIO_CHANNEL_IN_VOICE_UPLINK;
             break;
         case AUDIO_SOURCE_VOICE_DOWNLINK:
-            channelMask = AUDIO_CHANNEL_IN_VOICE_DNLINK;
+            channelMask |= AUDIO_CHANNEL_IN_VOICE_DNLINK;
             break;
         case AUDIO_SOURCE_VOICE_CALL:
-            channelMask = AUDIO_CHANNEL_IN_VOICE_UPLINK | AUDIO_CHANNEL_IN_VOICE_DNLINK;
+            channelMask |= AUDIO_CHANNEL_IN_VOICE_UPLINK | AUDIO_CHANNEL_IN_VOICE_DNLINK;
             break;
         default:
             break;
-        }*/
+        }
+#endif
         if (inputSource == AUDIO_SOURCE_HOTWORD) {
             ssize_t index = mSoundTriggerSessions.indexOfKey(session);
             if (index >= 0) {
@@ -5369,8 +5378,6 @@ AudioPolicyManager::routing_strategy AudioPolicyManager::getStrategy(
         return STRATEGY_SONIFICATION_RESPECTFUL;
     case AUDIO_STREAM_DTMF:
         return STRATEGY_DTMF;
-    default:
-        ALOGE("unknown stream type %d", stream);
     case AUDIO_STREAM_SYSTEM:
         // NOTE: SYSTEM stream uses MEDIA strategy because muting music and switching outputs
         // while key clicks are played produces a poor result
@@ -5387,7 +5394,10 @@ AudioPolicyManager::routing_strategy AudioPolicyManager::getStrategy(
         return STRATEGY_ACCESSIBILITY;
     case AUDIO_STREAM_REROUTING:
         return STRATEGY_REROUTING;
+    default:
+        ALOGE("unknown stream type %d", stream);
     }
+    return STRATEGY_MEDIA;
 }
 
 uint32_t AudioPolicyManager::getStrategyForAttr(const audio_attributes_t *attr) {
@@ -5627,7 +5637,7 @@ audio_devices_t AudioPolicyManager::getDeviceForStrategy(routing_strategy strate
             if (device) break;
             device = availableOutputDeviceTypes & AUDIO_DEVICE_OUT_USB_DEVICE;
             if (device) break;
-            if (mPhoneState != AUDIO_MODE_IN_CALL) {
+            if (!isInCall()) {
                 device = availableOutputDeviceTypes & AUDIO_DEVICE_OUT_USB_ACCESSORY;
                 if (device) break;
                 device = availableOutputDeviceTypes & AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET;
